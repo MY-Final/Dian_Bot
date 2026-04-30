@@ -12,6 +12,8 @@ import type { MessageEvent, NoticeEvent, RequestEvent } from "../event/EventType
 export class PluginManager {
   private plugins = new Map<string, Plugin>();
   private contexts = new Map<string, PluginContext>();
+  /** 每个插件绑定的事件处理器（用于卸载时清理） */
+  private boundHandlers = new Map<string, Array<{ event: string; handler: (e: unknown) => void }>>();
   private botId: string;
   private api: BotAPI;
   private eventBus: EventBus;
@@ -60,15 +62,39 @@ export class PluginManager {
     const plugin = this.plugins.get(pluginName);
     if (!plugin) return;
 
+    // 调用 onUnload
     try {
       await plugin.onUnload?.();
     } catch (err) {
       console.error(`[PluginManager] 插件 "${pluginName}" 卸载失败:`, err);
     }
 
+    // 移除事件监听
+    this.unbindPluginEvents(pluginName);
+
     this.plugins.delete(pluginName);
     this.contexts.delete(pluginName);
     console.log(`[PluginManager] 插件 "${pluginName}" 已卸载`);
+  }
+
+  /**
+   * 热重载插件
+   * 卸载旧插件，注册新插件实例
+   * @param pluginName - 插件名称
+   * @param newPlugin - 新的插件实例
+   */
+  async reload(pluginName: string, newPlugin: Plugin): Promise<void> {
+    console.log(`[PluginManager] 热重载插件 "${pluginName}"...`);
+    await this.unregister(pluginName);
+    await this.register(newPlugin);
+    console.log(`[PluginManager] 插件 "${pluginName}" 热重载完成`);
+  }
+
+  /**
+   * 检查插件是否已注册
+   */
+  has(pluginName: string): boolean {
+    return this.plugins.has(pluginName);
   }
 
   /**
@@ -115,37 +141,61 @@ export class PluginManager {
    * 将插件的事件处理函数绑定到事件总线
    */
   private bindPluginEvents(plugin: Plugin, ctx: PluginContext): void {
+    const handlers: Array<{ event: string; handler: (e: unknown) => void }> = [];
+
     // 消息事件
     if (plugin.onMessage) {
-      this.eventBus.on("message", (event: MessageEvent) => {
+      const handler = (event: MessageEvent) => {
         try {
           plugin.onMessage!(event, ctx);
         } catch (err) {
           console.error(`[PluginManager] 插件 "${plugin.name}" onMessage 错误:`, err);
         }
-      });
+      };
+      this.eventBus.on("message", handler);
+      handlers.push({ event: "message", handler: handler as (e: unknown) => void });
     }
 
     // 通知事件
     if (plugin.onNotice) {
-      this.eventBus.on("notice", (event: NoticeEvent) => {
+      const handler = (event: NoticeEvent) => {
         try {
           plugin.onNotice!(event, ctx);
         } catch (err) {
           console.error(`[PluginManager] 插件 "${plugin.name}" onNotice 错误:`, err);
         }
-      });
+      };
+      this.eventBus.on("notice", handler);
+      handlers.push({ event: "notice", handler: handler as (e: unknown) => void });
     }
 
     // 请求事件
     if (plugin.onRequest) {
-      this.eventBus.on("request", (event: RequestEvent) => {
+      const handler = (event: RequestEvent) => {
         try {
           plugin.onRequest!(event, ctx);
         } catch (err) {
           console.error(`[PluginManager] 插件 "${plugin.name}" onRequest 错误:`, err);
         }
-      });
+      };
+      this.eventBus.on("request", handler);
+      handlers.push({ event: "request", handler: handler as (e: unknown) => void });
     }
+
+    this.boundHandlers.set(plugin.name, handlers);
+  }
+
+  /**
+   * 移除插件绑定的所有事件监听器
+   */
+  private unbindPluginEvents(pluginName: string): void {
+    const handlers = this.boundHandlers.get(pluginName);
+    if (!handlers) return;
+
+    for (const { event, handler } of handlers) {
+      this.eventBus.off(event, handler);
+    }
+
+    this.boundHandlers.delete(pluginName);
   }
 }

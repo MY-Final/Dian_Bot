@@ -2,6 +2,7 @@ import { BotManager } from "./BotManager.js";
 import { BotClient, type BotClientConfig } from "./BotClient.js";
 import { PluginManager } from "../plugin/PluginManager.js";
 import { PluginLoader } from "../plugin/PluginLoader.js";
+import { PluginWatcher } from "../plugin/PluginWatcher.js";
 
 /** Runtime 配置 */
 export interface RuntimeConfig {
@@ -9,6 +10,8 @@ export interface RuntimeConfig {
   bots: BotClientConfig[];
   /** 插件目录路径（相对于项目根目录） */
   pluginsDir?: string;
+  /** 是否启用插件热重载（默认 true） */
+  hotReload?: boolean;
 }
 
 /**
@@ -20,6 +23,7 @@ export class Runtime {
   private botManager: BotManager;
   private pluginManagers = new Map<string, PluginManager>();
   private pluginLoader: PluginLoader;
+  private pluginWatcher: PluginWatcher | null = null;
 
   constructor(config: RuntimeConfig) {
     this.config = config;
@@ -29,7 +33,7 @@ export class Runtime {
 
   /**
    * 启动运行时
-   * 创建所有 Bot 实例，加载插件
+   * 创建所有 Bot 实例，加载插件，启动监听
    */
   async start(): Promise<void> {
     console.log("[Runtime] 启动中...");
@@ -54,6 +58,12 @@ export class Runtime {
     // 加载插件
     if (this.config.pluginsDir) {
       await this.loadPlugins(this.config.pluginsDir);
+
+      // 启动插件监听（热重载）
+      const hotReload = this.config.hotReload !== false; // 默认开启
+      if (hotReload) {
+        await this.startWatcher(this.config.pluginsDir);
+      }
     }
 
     console.log(`[Runtime] 已启动 ${this.botManager.size} 个 Bot 实例`);
@@ -80,11 +90,73 @@ export class Runtime {
   }
 
   /**
+   * 启动插件目录监听
+   * @param dir - 插件目录路径
+   */
+  private async startWatcher(dir: string): Promise<void> {
+    this.pluginWatcher = new PluginWatcher(dir);
+
+    this.pluginWatcher.onChange(async (event) => {
+      switch (event.type) {
+        case "add": {
+          // 新插件：加载并注册到所有 Bot
+          const plugin = await this.pluginLoader.loadSingle(event.pluginName, event.dirPath);
+          if (!plugin) return;
+          for (const [botId, pm] of this.pluginManagers) {
+            try {
+              await pm.register(plugin);
+            } catch (err) {
+              console.error(`[Runtime] 注册插件 "${plugin.name}" 到 Bot "${botId}" 失败:`, err);
+            }
+          }
+          break;
+        }
+
+        case "change": {
+          // 插件修改：清除缓存，重新加载，热重载
+          this.pluginLoader.invalidateCache(event.pluginName);
+          const plugin = await this.pluginLoader.loadSingle(event.pluginName, event.dirPath);
+          if (!plugin) return;
+          for (const [botId, pm] of this.pluginManagers) {
+            try {
+              await pm.reload(event.pluginName, plugin);
+            } catch (err) {
+              console.error(`[Runtime] 热重载插件 "${plugin.name}" 到 Bot "${botId}" 失败:`, err);
+            }
+          }
+          break;
+        }
+
+        case "remove": {
+          // 插件删除：卸载
+          for (const [botId, pm] of this.pluginManagers) {
+            try {
+              await pm.unregister(event.pluginName);
+            } catch (err) {
+              console.error(`[Runtime] 卸载插件 "${event.pluginName}" 从 Bot "${botId}" 失败:`, err);
+            }
+          }
+          break;
+        }
+      }
+    });
+
+    await this.pluginWatcher.start();
+    console.log("[Runtime] 插件热重载已启用");
+  }
+
+  /**
    * 停止运行时
    * 卸载插件并销毁所有 Bot 实例
    */
   async stop(): Promise<void> {
     console.log("[Runtime] 停止中...");
+
+    // 停止监听
+    if (this.pluginWatcher) {
+      this.pluginWatcher.stop();
+      this.pluginWatcher = null;
+    }
 
     // 卸载所有插件
     for (const [botId, pluginManager] of this.pluginManagers) {
