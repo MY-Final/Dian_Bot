@@ -8,8 +8,13 @@ import type { MessageEvent, GroupMessageEvent } from "../../event/EventTypes.js"
  */
 const plugin: Plugin = {
   name: "welcome",
-  description: "新成员入群欢迎插件",
+  description: "基础指令插件",
   version: "1.0.0",
+
+  commands: [
+    { command: "/ping", description: "测试 Bot 是否在线", usage: "/ping" },
+    { command: "/info", description: "查看 Bot 登录信息", usage: "/info" },
+  ],
 
   onLoad(ctx: PluginContext) {
     ctx.logger.log("Welcome 插件已加载");

@@ -1,4 +1,4 @@
-import type { Plugin } from "./types.js";
+import type { Plugin, PluginCommand } from "./types.js";
 import type { PluginContext } from "./context.js";
 import type { BotAPI } from "../services/BotAPI.js";
 import { createPluginContext } from "./context.js";
@@ -33,7 +33,7 @@ export class PluginManager {
     }
 
     // 创建上下文
-    const ctx = createPluginContext(this.botId, plugin.name, this.api);
+    const ctx = createPluginContext(this.botId, plugin.name, this.api, () => this.getAllCommands());
     this.plugins.set(plugin.name, plugin);
     this.contexts.set(plugin.name, ctx);
 
@@ -84,6 +84,22 @@ export class PluginManager {
    */
   getAllPlugins(): Plugin[] {
     return Array.from(this.plugins.values());
+  }
+
+  /**
+   * 获取所有插件注册的命令
+   * @returns 命令列表，包含所属插件名
+   */
+  getAllCommands(): Array<PluginCommand & { pluginName: string }> {
+    const commands: Array<PluginCommand & { pluginName: string }> = [];
+    for (const plugin of this.plugins.values()) {
+      if (plugin.commands) {
+        for (const cmd of plugin.commands) {
+          commands.push({ ...cmd, pluginName: plugin.name });
+        }
+      }
+    }
+    return commands;
   }
 
   /**

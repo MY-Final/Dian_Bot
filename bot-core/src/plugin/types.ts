@@ -1,6 +1,16 @@
 import type { MessageEvent, NoticeEvent, RequestEvent } from "../event/EventTypes.js";
 import type { PluginContext } from "./context.js";
 
+/** 插件命令定义 */
+export interface PluginCommand {
+  /** 命令触发词，例如 "/ping"、"帮助" */
+  command: string;
+  /** 命令说明 */
+  description: string;
+  /** 用法示例，例如 "/ping" */
+  usage?: string;
+}
+
 /**
  * 插件接口
  * 所有插件必须实现此接口
@@ -14,6 +24,9 @@ export interface Plugin {
 
   /** 插件版本 */
   version?: string;
+
+  /** 插件注册的命令列表（用于帮助菜单展示） */
+  commands?: PluginCommand[];
 
   /**
    * 插件加载时调用
