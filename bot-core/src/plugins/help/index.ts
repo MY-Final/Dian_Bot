@@ -1,13 +1,17 @@
 import type { Plugin } from "../../plugin/types.js";
 import type { PluginContext } from "../../plugin/context.js";
 import type { MessageEvent, GroupMessageEvent } from "../../event/EventTypes.js";
+import { parseCommand, matchCommand } from "../../utils/command.js";
+
+/** 需要参数的命令列表 */
+const COMMANDS_REQUIRING_ARGS = ["启用", "停用"];
 
 /**
  * Help 插件
  * - "帮助"/"菜单"：显示所有启用插件的命令
  * - "插件列表"：显示所有插件及状态
- * - "启用 [插件名]"：启用指定插件
- * - "停用 [插件名]"：停用指定插件
+ * - "启用[插件名]" / "启用 [插件名]"：启用指定插件
+ * - "停用[插件名]" / "停用 [插件名]"：停用指定插件
  */
 const plugin: Plugin = {
   name: "help",
@@ -18,8 +22,8 @@ const plugin: Plugin = {
     { command: "帮助", description: "显示所有可用命令", usage: "帮助" },
     { command: "菜单", description: "显示所有可用命令", usage: "菜单" },
     { command: "插件列表", description: "查看所有插件及状态", usage: "插件列表" },
-    { command: "启用", description: "启用指定插件", usage: "启用 [插件名]" },
-    { command: "停用", description: "停用指定插件", usage: "停用 [插件名]" },
+    { command: "启用", description: "启用指定插件", usage: "启用[插件名]" },
+    { command: "停用", description: "停用指定插件", usage: "停用[插件名]" },
   ],
 
   onLoad(ctx) {
@@ -34,7 +38,7 @@ const plugin: Plugin = {
     const rawMsg = event.raw_message.trim();
 
     // ---- 帮助菜单 ----
-    if (rawMsg === "帮助" || rawMsg === "菜单") {
+    if (matchCommand(rawMsg, "帮助") || matchCommand(rawMsg, "菜单")) {
       const commands = ctx.getAllCommands();
 
       if (commands.length === 0) {
@@ -66,7 +70,7 @@ const plugin: Plugin = {
     }
 
     // ---- 插件列表 ----
-    if (rawMsg === "插件列表") {
+    if (matchCommand(rawMsg, "插件列表")) {
       const infos = ctx.control.getAllPluginInfos();
 
       if (infos.length === 0) {
@@ -82,48 +86,35 @@ const plugin: Plugin = {
         lines.push(`${statusIcon} ${info.name}${ver}${desc}`);
       }
       lines.push("");
-      lines.push('发送 "启用/停用 [插件名]" 切换状态');
+      lines.push('发送 "启用/停用[插件名]" 切换状态');
 
       await ctx.api.sendGroupMsg(groupId, lines.join("\n"));
       return;
     }
 
-    // ---- 启用插件 ----
-    if (rawMsg.startsWith("启用 ")) {
-      const pluginName = rawMsg.slice(3).trim();
+    // ---- 启用/停用插件 ----
+    const parsed = parseCommand(rawMsg, ["启用", "停用"]);
+    if (parsed) {
+      const { command, args: pluginName } = parsed;
+
+      // 检查是否有参数
       if (!pluginName) {
-        await ctx.api.sendGroupMsg(groupId, "用法: 启用 [插件名]");
+        await ctx.api.sendGroupMsg(groupId, `用法: ${command}[插件名]`);
         return;
       }
 
-      const success = await ctx.control.enable(pluginName);
-      if (success) {
-        await ctx.api.sendGroupMsg(groupId, `插件 "${pluginName}" 已启用`);
-      } else {
-        await ctx.api.sendGroupMsg(groupId, `插件 "${pluginName}" 不存在`);
-      }
-      return;
-    }
-
-    // ---- 停用插件 ----
-    if (rawMsg.startsWith("停用 ")) {
-      const pluginName = rawMsg.slice(3).trim();
-      if (!pluginName) {
-        await ctx.api.sendGroupMsg(groupId, "用法: 停用 [插件名]");
-        return;
-      }
-
-      // 禁止停用自己（help 插件）
-      if (pluginName === "help") {
+      // 禁止停用自己
+      if (command === "停用" && pluginName === "help") {
         await ctx.api.sendGroupMsg(groupId, "不能停用 help 插件");
         return;
       }
 
-      const success = await ctx.control.disable(pluginName);
-      if (success) {
-        await ctx.api.sendGroupMsg(groupId, `插件 "${pluginName}" 已停用`);
+      if (command === "启用") {
+        const success = await ctx.control.enable(pluginName);
+        await ctx.api.sendGroupMsg(groupId, success ? `插件 "${pluginName}" 已启用` : `插件 "${pluginName}" 不存在`);
       } else {
-        await ctx.api.sendGroupMsg(groupId, `插件 "${pluginName}" 不存在`);
+        const success = await ctx.control.disable(pluginName);
+        await ctx.api.sendGroupMsg(groupId, success ? `插件 "${pluginName}" 已停用` : `插件 "${pluginName}" 不存在`);
       }
       return;
     }
