@@ -1,6 +1,9 @@
 import type { MessageEvent, NoticeEvent, RequestEvent } from "../event/EventTypes.js";
 import type { PluginContext } from "./context.js";
 
+/** 插件状态 */
+export type PluginStatus = "enabled" | "disabled";
+
 /** 插件命令定义 */
 export interface PluginCommand {
   /** 命令触发词，例如 "/ping"、"帮助" */
@@ -29,32 +32,44 @@ export interface Plugin {
   commands?: PluginCommand[];
 
   /**
-   * 插件加载时调用
+   * 插件加载时调用（仅在首次加载和热重载时触发）
    * @param ctx - 插件上下文
    */
   onLoad?(ctx: PluginContext): void | Promise<void>;
 
   /**
-   * 插件卸载时调用
+   * 插件卸载时调用（热重载或删除时触发）
    */
   onUnload?(): void | Promise<void>;
 
   /**
-   * 收到消息时调用
+   * 插件启用时调用（首次加载后 + 从停用恢复时触发）
+   * @param ctx - 插件上下文
+   */
+  onEnable?(ctx: PluginContext): void | Promise<void>;
+
+  /**
+   * 插件停用时调用
+   * @param ctx - 插件上下文
+   */
+  onDisable?(ctx: PluginContext): void | Promise<void>;
+
+  /**
+   * 收到消息时调用（仅启用状态触发）
    * @param event - 消息事件
    * @param ctx - 插件上下文
    */
   onMessage?(event: MessageEvent, ctx: PluginContext): void | Promise<void>;
 
   /**
-   * 收到通知时调用
+   * 收到通知时调用（仅启用状态触发）
    * @param event - 通知事件
    * @param ctx - 插件上下文
    */
   onNotice?(event: NoticeEvent, ctx: PluginContext): void | Promise<void>;
 
   /**
-   * 收到请求时调用
+   * 收到请求时调用（仅启用状态触发）
    * @param event - 请求事件
    * @param ctx - 插件上下文
    */
