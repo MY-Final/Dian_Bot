@@ -1,8 +1,19 @@
 import type { MessageEvent, NoticeEvent, RequestEvent } from "../event/EventTypes.js";
+import type { EmitEventContext } from "../event/EventContext.js";
 import type { PluginContext } from "./context.js";
 
 /** 插件状态 */
 export type PluginStatus = "enabled" | "disabled";
+
+/** 插件优先级 */
+export interface PluginPriority {
+  /** 消息事件处理优先级，默认 100 */
+  message?: number;
+  /** 通知事件处理优先级，默认 100 */
+  notice?: number;
+  /** 请求事件处理优先级，默认 100 */
+  request?: number;
+}
 
 /** 插件命令定义 */
 export interface PluginCommand {
@@ -32,6 +43,13 @@ export interface Plugin {
   commands?: PluginCommand[];
 
   /**
+   * 事件处理优先级
+   * 数字越小越先执行，默认 100
+   * 可按事件类型分别设置
+   */
+  priority?: PluginPriority;
+
+  /**
    * 插件加载时调用（仅在首次加载和热重载时触发）
    * @param ctx - 插件上下文
    */
@@ -58,22 +76,25 @@ export interface Plugin {
    * 收到消息时调用（仅启用状态触发）
    * @param event - 消息事件
    * @param ctx - 插件上下文
+   * @param emitCtx - 事件发射上下文（可调用 stopPropagation 阻止后续插件处理）
    */
-  onMessage?(event: MessageEvent, ctx: PluginContext): void | Promise<void>;
+  onMessage?(event: MessageEvent, ctx: PluginContext, emitCtx?: EmitEventContext<MessageEvent>): void | Promise<void>;
 
   /**
    * 收到通知时调用（仅启用状态触发）
    * @param event - 通知事件
    * @param ctx - 插件上下文
+   * @param emitCtx - 事件发射上下文
    */
-  onNotice?(event: NoticeEvent, ctx: PluginContext): void | Promise<void>;
+  onNotice?(event: NoticeEvent, ctx: PluginContext, emitCtx?: EmitEventContext<NoticeEvent>): void | Promise<void>;
 
   /**
    * 收到请求时调用（仅启用状态触发）
    * @param event - 请求事件
    * @param ctx - 插件上下文
+   * @param emitCtx - 事件发射上下文
    */
-  onRequest?(event: RequestEvent, ctx: PluginContext): void | Promise<void>;
+  onRequest?(event: RequestEvent, ctx: PluginContext, emitCtx?: EmitEventContext<RequestEvent>): void | Promise<void>;
 }
 
 /**

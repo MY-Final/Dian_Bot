@@ -1,9 +1,13 @@
-import type { Plugin, PluginCommand, PluginStatus } from "./types.js";
+import type { Plugin, PluginCommand, PluginStatus, PluginPriority } from "./types.js";
 import type { PluginContext, PluginControl, PluginInfo } from "./context.js";
 import type { BotAPI } from "../services/BotAPI.js";
 import { createPluginContext } from "./context.js";
 import type { EventBus } from "../event/EventBus.js";
+import type { EmitEventContext } from "../event/EventContext.js";
 import type { MessageEvent, NoticeEvent, RequestEvent } from "../event/EventTypes.js";
+
+/** 默认优先级 */
+const DEFAULT_PRIORITY = 100;
 
 /**
  * 插件管理器
@@ -14,7 +18,7 @@ export class PluginManager {
   private contexts = new Map<string, PluginContext>();
   private statuses = new Map<string, PluginStatus>();
   /** 每个插件绑定的事件处理器（用于卸载时清理） */
-  private boundHandlers = new Map<string, Array<{ event: string; handler: (e: unknown) => void }>>();
+  private boundHandlers = new Map<string, Array<{ event: string; handler: (e: unknown, ctx: EmitEventContext) => void; dispose: () => void }>>();
   private botId: string;
   private api: BotAPI;
   private eventBus: EventBus;
@@ -284,51 +288,52 @@ export class PluginManager {
 
   /**
    * 将插件的事件处理函数绑定到事件总线
+   * 使用插件配置的优先级
    */
   private bindPluginEvents(plugin: Plugin, ctx: PluginContext): void {
-    const handlers: Array<{ event: string; handler: (e: unknown) => void }> = [];
+    const handlers: Array<{ event: string; handler: (e: unknown, ctx: EmitEventContext) => void; dispose: () => void }> = [];
+    const priority = plugin.priority ?? {};
 
     // 消息事件
     if (plugin.onMessage) {
-      const handler = (event: MessageEvent) => {
-        // 检查插件状态
+      const handler = (event: MessageEvent, emitCtx: EmitEventContext<MessageEvent>) => {
         if (this.statuses.get(plugin.name) !== "enabled") return;
         try {
-          plugin.onMessage!(event, ctx);
+          plugin.onMessage!(event, ctx, emitCtx);
         } catch (err) {
           console.error(`[PluginManager] 插件 "${plugin.name}" onMessage 错误:`, err);
         }
       };
-      this.eventBus.on("message", handler);
-      handlers.push({ event: "message", handler: handler as (e: unknown) => void });
+      const dispose = this.eventBus.on("message", handler, { priority: priority.message ?? DEFAULT_PRIORITY });
+      handlers.push({ event: "message", handler: handler as (e: unknown, ctx: EmitEventContext) => void, dispose });
     }
 
     // 通知事件
     if (plugin.onNotice) {
-      const handler = (event: NoticeEvent) => {
+      const handler = (event: NoticeEvent, emitCtx: EmitEventContext<NoticeEvent>) => {
         if (this.statuses.get(plugin.name) !== "enabled") return;
         try {
-          plugin.onNotice!(event, ctx);
+          plugin.onNotice!(event, ctx, emitCtx);
         } catch (err) {
           console.error(`[PluginManager] 插件 "${plugin.name}" onNotice 错误:`, err);
         }
       };
-      this.eventBus.on("notice", handler);
-      handlers.push({ event: "notice", handler: handler as (e: unknown) => void });
+      const dispose = this.eventBus.on("notice", handler, { priority: priority.notice ?? DEFAULT_PRIORITY });
+      handlers.push({ event: "notice", handler: handler as (e: unknown, ctx: EmitEventContext) => void, dispose });
     }
 
     // 请求事件
     if (plugin.onRequest) {
-      const handler = (event: RequestEvent) => {
+      const handler = (event: RequestEvent, emitCtx: EmitEventContext<RequestEvent>) => {
         if (this.statuses.get(plugin.name) !== "enabled") return;
         try {
-          plugin.onRequest!(event, ctx);
+          plugin.onRequest!(event, ctx, emitCtx);
         } catch (err) {
           console.error(`[PluginManager] 插件 "${plugin.name}" onRequest 错误:`, err);
         }
       };
-      this.eventBus.on("request", handler);
-      handlers.push({ event: "request", handler: handler as (e: unknown) => void });
+      const dispose = this.eventBus.on("request", handler, { priority: priority.request ?? DEFAULT_PRIORITY });
+      handlers.push({ event: "request", handler: handler as (e: unknown, ctx: EmitEventContext) => void, dispose });
     }
 
     this.boundHandlers.set(plugin.name, handlers);
@@ -341,8 +346,8 @@ export class PluginManager {
     const handlers = this.boundHandlers.get(pluginName);
     if (!handlers) return;
 
-    for (const { event, handler } of handlers) {
-      this.eventBus.off(event, handler);
+    for (const { dispose } of handlers) {
+      dispose();
     }
 
     this.boundHandlers.delete(pluginName);
