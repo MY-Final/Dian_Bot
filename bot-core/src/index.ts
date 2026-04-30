@@ -16,19 +16,21 @@ const runtime = new Runtime({
       },
     },
   ],
+  pluginsDir: "./src/plugins",
 });
 
 // 优雅退出
-process.on("SIGINT", () => {
-  console.log("\n收到 SIGINT，正在关闭...");
-  runtime.stop();
+const shutdown = async () => {
+  console.log("\n正在关闭...");
+  await runtime.stop();
   process.exit(0);
-});
+};
 
-process.on("SIGTERM", () => {
-  console.log("\n收到 SIGTERM，正在关闭...");
-  runtime.stop();
-  process.exit(0);
-});
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
-runtime.start();
+// 启动
+runtime.start().catch((err) => {
+  console.error("启动失败:", err);
+  process.exit(1);
+});

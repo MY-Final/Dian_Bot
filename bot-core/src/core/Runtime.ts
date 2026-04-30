@@ -1,5 +1,7 @@
 import { BotManager } from "./BotManager.js";
-import type { BotClientConfig } from "./BotClient.js";
+import { BotClient, type BotClientConfig } from "./BotClient.js";
+import { PluginManager } from "../plugin/PluginManager.js";
+import { PluginLoader } from "../plugin/PluginLoader.js";
 
 /** Runtime 配置 */
 export interface RuntimeConfig {
@@ -16,37 +18,82 @@ export interface RuntimeConfig {
 export class Runtime {
   private config: RuntimeConfig;
   private botManager: BotManager;
+  private pluginManagers = new Map<string, PluginManager>();
+  private pluginLoader: PluginLoader;
 
   constructor(config: RuntimeConfig) {
     this.config = config;
     this.botManager = new BotManager();
+    this.pluginLoader = new PluginLoader();
   }
 
   /**
    * 启动运行时
-   * 创建所有 Bot 实例并连接
+   * 创建所有 Bot 实例，加载插件
    */
-  start(): void {
+  async start(): Promise<void> {
     console.log("[Runtime] 启动中...");
 
     // 创建 Bot 实例
     for (const botConfig of this.config.bots) {
       try {
-        this.botManager.createBot(botConfig);
+        const client = this.botManager.createBot(botConfig);
+
+        // 为每个 Bot 创建插件管理器
+        const pluginManager = new PluginManager(
+          botConfig.botId,
+          client.api,
+          client.eventBus,
+        );
+        this.pluginManagers.set(botConfig.botId, pluginManager);
       } catch (err) {
         console.error(`[Runtime] 创建 Bot "${botConfig.botId}" 失败:`, err);
       }
+    }
+
+    // 加载插件
+    if (this.config.pluginsDir) {
+      await this.loadPlugins(this.config.pluginsDir);
     }
 
     console.log(`[Runtime] 已启动 ${this.botManager.size} 个 Bot 实例`);
   }
 
   /**
-   * 停止运行时
-   * 销毁所有 Bot 实例
+   * 从目录加载插件并注册到所有 Bot
+   * @param dir - 插件目录路径
    */
-  stop(): void {
+  private async loadPlugins(dir: string): Promise<void> {
+    const plugins = await this.pluginLoader.loadFromDir(dir);
+
+    for (const [botId, pluginManager] of this.pluginManagers) {
+      for (const plugin of plugins) {
+        try {
+          await pluginManager.register(plugin);
+        } catch (err) {
+          console.error(`[Runtime] 注册插件 "${plugin.name}" 到 Bot "${botId}" 失败:`, err);
+        }
+      }
+    }
+
+    console.log(`[Runtime] 已加载 ${plugins.length} 个插件`);
+  }
+
+  /**
+   * 停止运行时
+   * 卸载插件并销毁所有 Bot 实例
+   */
+  async stop(): Promise<void> {
     console.log("[Runtime] 停止中...");
+
+    // 卸载所有插件
+    for (const [botId, pluginManager] of this.pluginManagers) {
+      await pluginManager.unregisterAll();
+      console.log(`[Runtime] Bot "${botId}" 插件已卸载`);
+    }
+    this.pluginManagers.clear();
+
+    // 销毁所有 Bot
     this.botManager.destroyAll();
     console.log("[Runtime] 已停止");
   }
@@ -56,5 +103,13 @@ export class Runtime {
    */
   getBotManager(): BotManager {
     return this.botManager;
+  }
+
+  /**
+   * 获取指定 Bot 的插件管理器
+   * @param botId - Bot ID
+   */
+  getPluginManager(botId: string): PluginManager | undefined {
+    return this.pluginManagers.get(botId);
   }
 }
