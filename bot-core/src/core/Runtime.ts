@@ -48,6 +48,7 @@ export class Runtime {
           botConfig.botId,
           client.api,
           client.eventBus,
+          { pluginsDir: this.config.pluginsDir ?? "./plugins" },
         );
         this.pluginManagers.set(botConfig.botId, pluginManager);
       } catch (err) {

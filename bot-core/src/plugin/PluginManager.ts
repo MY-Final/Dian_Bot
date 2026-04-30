@@ -1,13 +1,24 @@
 import type { Plugin, PluginCommand, PluginStatus, PluginPriority } from "./types.js";
-import type { PluginContext, PluginControl, PluginInfo } from "./context.js";
+import type { PluginContext, PluginControl, PluginInfo, PluginConfigAccessor, PluginCooldownAccessor } from "./context.js";
 import type { BotAPI } from "../services/BotAPI.js";
 import { createPluginContext } from "./context.js";
 import type { EventBus } from "../event/EventBus.js";
 import type { EmitEventContext } from "../event/EventContext.js";
 import type { MessageEvent, NoticeEvent, RequestEvent } from "../event/EventTypes.js";
+import { PluginConfigManager } from "./PluginConfig.js";
+import { CooldownManager } from "./PluginCooldown.js";
+import { PluginBus } from "./PluginBus.js";
+import { PluginScheduler } from "./PluginScheduler.js";
+import { JsonFileStore, type PluginStore } from "./PluginStore.js";
 
 /** 默认优先级 */
 const DEFAULT_PRIORITY = 100;
+
+/** PluginManager 配置 */
+export interface PluginManagerConfig {
+  /** 插件目录路径 */
+  pluginsDir: string;
+}
 
 /**
  * 插件管理器
@@ -22,15 +33,31 @@ export class PluginManager {
   private botId: string;
   private api: BotAPI;
   private eventBus: EventBus;
+  private pluginsDir: string;
+
+  // 共享组件
+  private configManager: PluginConfigManager;
+  private cooldownManager: CooldownManager;
+  private pluginBus: PluginBus;
+  /** 每个插件独立的调度器 */
+  private schedulers = new Map<string, PluginScheduler>();
+  /** 每个插件独立的存储 */
+  private stores = new Map<string, PluginStore>();
+
   /** 插件管理能力（注入到上下文） */
   private control: PluginControl;
 
-  constructor(botId: string, api: BotAPI, eventBus: EventBus) {
+  constructor(botId: string, api: BotAPI, eventBus: EventBus, config: PluginManagerConfig) {
     this.botId = botId;
     this.api = api;
     this.eventBus = eventBus;
+    this.pluginsDir = config.pluginsDir;
 
-    // 创建 control 对象，延迟绑定到 this
+    this.configManager = new PluginConfigManager(config.pluginsDir);
+    this.cooldownManager = new CooldownManager();
+    this.pluginBus = new PluginBus();
+
+    // 创建 control 对象
     this.control = {
       enable: (name: string) => this.enable(name),
       disable: (name: string) => this.disable(name),
@@ -50,8 +77,35 @@ export class PluginManager {
       return;
     }
 
+    // 创建该插件专属的调度器和存储
+    const scheduler = new PluginScheduler();
+    const store = new JsonFileStore(this.pluginsDir, plugin.name);
+    this.schedulers.set(plugin.name, scheduler);
+    this.stores.set(plugin.name, store);
+
+    // 创建配置和冷却的访问器（绑定插件名）
+    const configAccessor: PluginConfigAccessor = {
+      get: <T>(key: string, defaultVal: T) => this.configManager.get<T>(plugin.name, key, defaultVal),
+      set: (key: string, value: unknown) => this.configManager.set(plugin.name, key, value),
+      has: (key: string) => this.configManager.has(plugin.name, key),
+      delete: (key: string) => this.configManager.delete(plugin.name, key),
+    };
+
+    const cooldownAccessor: PluginCooldownAccessor = {
+      check: (userId: number | string) => this.cooldownManager.isCooldown(plugin.name, userId),
+      set: (userId: number | string, seconds: number) => this.cooldownManager.setCooldown(plugin.name, userId, seconds),
+      remaining: (userId: number | string) => this.cooldownManager.getRemaining(plugin.name, userId),
+      clear: (userId?: number | string) => this.cooldownManager.clear(plugin.name, userId),
+    };
+
     // 创建上下文
-    const ctx = createPluginContext(this.botId, plugin.name, this.api, () => this.getAllCommands(), this.control);
+    const ctx = createPluginContext(
+      this.botId, plugin.name, this.api,
+      () => this.getAllCommands(), this.control,
+      configAccessor, cooldownAccessor,
+      this.pluginBus, scheduler, store,
+    );
+
     this.plugins.set(plugin.name, plugin);
     this.contexts.set(plugin.name, ctx);
     this.statuses.set(plugin.name, "enabled");
@@ -65,6 +119,8 @@ export class PluginManager {
       this.plugins.delete(plugin.name);
       this.contexts.delete(plugin.name);
       this.statuses.delete(plugin.name);
+      this.schedulers.delete(plugin.name);
+      this.stores.delete(plugin.name);
       return;
     }
 
@@ -105,6 +161,13 @@ export class PluginManager {
     // 移除事件监听
     this.unbindPluginEvents(pluginName);
 
+    // 清理插件专属资源
+    this.schedulers.get(pluginName)?.clearAll();
+    this.schedulers.delete(pluginName);
+    this.stores.delete(pluginName);
+    this.cooldownManager.clear(pluginName);
+    this.configManager.clearCache(pluginName);
+
     this.plugins.delete(pluginName);
     this.contexts.delete(pluginName);
     this.statuses.delete(pluginName);
@@ -113,23 +176,14 @@ export class PluginManager {
 
   /**
    * 热重载插件
-   * 卸载旧插件，注册新插件实例，保留原有状态
-   * @param pluginName - 插件名称
-   * @param newPlugin - 新的插件实例
    */
   async reload(pluginName: string, newPlugin: Plugin): Promise<void> {
-    // 记住原来的状态
     const wasEnabled = this.statuses.get(pluginName) !== "disabled";
-
     console.log(`[PluginManager] 热重载插件 "${pluginName}"...`);
 
-    // 注销（会触发 onDisable + onUnload）
     await this.unregister(pluginName);
-
-    // 注册新实例
     await this.register(newPlugin);
 
-    // 如果原来是停用的，注册后立即停用
     if (!wasEnabled) {
       await this.disable(newPlugin.name);
     }
@@ -139,19 +193,15 @@ export class PluginManager {
 
   /**
    * 启用插件
-   * @param pluginName - 插件名称
    */
   async enable(pluginName: string): Promise<boolean> {
     const plugin = this.plugins.get(pluginName);
     const ctx = this.contexts.get(pluginName);
     if (!plugin || !ctx) return false;
 
-    if (this.statuses.get(pluginName) === "enabled") {
-      return true; // 已经是启用状态
-    }
+    if (this.statuses.get(pluginName) === "enabled") return true;
 
     this.statuses.set(pluginName, "enabled");
-
     try {
       await plugin.onEnable?.(ctx);
     } catch (err) {
@@ -164,19 +214,15 @@ export class PluginManager {
 
   /**
    * 停用插件
-   * @param pluginName - 插件名称
    */
   async disable(pluginName: string): Promise<boolean> {
     const plugin = this.plugins.get(pluginName);
     const ctx = this.contexts.get(pluginName);
     if (!plugin || !ctx) return false;
 
-    if (this.statuses.get(pluginName) === "disabled") {
-      return true; // 已经是停用状态
-    }
+    if (this.statuses.get(pluginName) === "disabled") return true;
 
     this.statuses.set(pluginName, "disabled");
-
     try {
       await plugin.onDisable?.(ctx);
     } catch (err) {
@@ -189,7 +235,6 @@ export class PluginManager {
 
   /**
    * 切换插件状态
-   * @param pluginName - 插件名称
    */
   async toggle(pluginName: string): Promise<PluginStatus | null> {
     const current = this.statuses.get(pluginName);
@@ -204,47 +249,26 @@ export class PluginManager {
     }
   }
 
-  /**
-   * 获取插件状态
-   * @param pluginName - 插件名称
-   */
   getStatus(pluginName: string): PluginStatus | undefined {
     return this.statuses.get(pluginName);
   }
 
-  /**
-   * 检查插件是否已注册且启用
-   * @param pluginName - 插件名称
-   */
   isEnabled(pluginName: string): boolean {
     return this.statuses.get(pluginName) === "enabled";
   }
 
-  /**
-   * 检查插件是否已注册
-   */
   has(pluginName: string): boolean {
     return this.plugins.has(pluginName);
   }
 
-  /**
-   * 获取插件
-   * @param pluginName - 插件名称
-   */
   getPlugin(pluginName: string): Plugin | undefined {
     return this.plugins.get(pluginName);
   }
 
-  /**
-   * 获取所有已注册插件
-   */
   getAllPlugins(): Plugin[] {
     return Array.from(this.plugins.values());
   }
 
-  /**
-   * 获取所有插件信息（含状态）
-   */
   getAllPluginInfos(): PluginInfo[] {
     const result: PluginInfo[] = [];
     for (const [name, plugin] of this.plugins) {
@@ -259,14 +283,9 @@ export class PluginManager {
     return result;
   }
 
-  /**
-   * 获取所有插件注册的命令（仅启用的插件）
-   * @returns 命令列表，包含所属插件名
-   */
   getAllCommands(): Array<PluginCommand & { pluginName: string }> {
     const commands: Array<PluginCommand & { pluginName: string }> = [];
     for (const [name, plugin] of this.plugins) {
-      // 只收集启用插件的命令
       if (this.statuses.get(name) !== "enabled") continue;
       if (plugin.commands) {
         for (const cmd of plugin.commands) {
@@ -277,18 +296,15 @@ export class PluginManager {
     return commands;
   }
 
-  /**
-   * 卸载所有插件
-   */
   async unregisterAll(): Promise<void> {
     for (const pluginName of this.plugins.keys()) {
       await this.unregister(pluginName);
     }
+    this.pluginBus.clear();
   }
 
   /**
    * 将插件的事件处理函数绑定到事件总线
-   * 使用插件配置的优先级
    */
   private bindPluginEvents(plugin: Plugin, ctx: PluginContext): void {
     const handlers: Array<{ event: string; handler: (e: unknown, ctx: EmitEventContext) => void; dispose: () => void }> = [];
